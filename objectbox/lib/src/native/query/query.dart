@@ -946,6 +946,7 @@ class Query<T> {
         // is used to communicate with the spawned isolate.
         if (message is SendPort) {
           sendPort = message;
+          return; // wait for next message.
         }
         // Further messages are ObxObjectMessage for data, String for errors
         // and null when there is no more data.
@@ -956,7 +957,7 @@ class Query<T> {
                 InternalStoreAccess.reader(_store).access(
                     Pointer.fromAddress(message.dataPtrAddress),
                     message.size)));
-            return;
+            return; // wait for next message.
           } catch (e) {
             controller.addError(e);
           }
