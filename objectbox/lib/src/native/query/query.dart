@@ -1006,6 +1006,8 @@ class Query<T> {
       sendPort.send(e.toString());
     }
 
+    // FIXME Pointers may already be invalid here, but main isolate might
+    //   not have received or deserialized final object.
     // Signal to the main isolate there are no more results.
     sendPort.send(null);
 
