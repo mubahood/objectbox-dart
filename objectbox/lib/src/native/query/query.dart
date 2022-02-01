@@ -978,7 +978,8 @@ class Query<T> {
     }
   }
 
-  void _queryAndVisit(StreamIsolateInit isolateInit) {
+  // Isolate entry point must be top-level or static.
+  static void _queryAndVisit(StreamIsolateInit isolateInit) {
     var sendPort = isolateInit.sendPort;
 
     // FIXME How to listen to exit command while sending?
