@@ -978,7 +978,7 @@ class Query<T> {
     }
   }
 
-  Future<void> _queryAndVisit(StreamIsolateInit isolateInit) {
+  void _queryAndVisit(StreamIsolateInit isolateInit) {
     var sendPort = isolateInit.sendPort;
 
     // FIXME How to listen to exit command while sending?
@@ -1008,7 +1008,8 @@ class Query<T> {
     // Signal to the main isolate there are no more results.
     sendPort.send(null);
 
-    Isolate.exit();
+    // Only available on Dart 2.15+
+    // Isolate.exit();
   }
 
   /// For internal testing purposes.
