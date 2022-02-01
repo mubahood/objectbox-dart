@@ -815,6 +815,12 @@ class Query<T> {
   /// with an overhead so a plain [find()] is usually faster.
   Stream<T> stream() => _stream1();
 
+  /// Finds Objects matching the query, streaming them while the query executes.
+  ///
+  /// Note: make sure you evaluate performance in your use case - streams come
+  /// with an overhead so a plain [find()] is usually faster.
+  Future<Stream<T>> streamIsolate() => _streamIsolate();
+
   /// Stream items by sending full flatbuffers binary as a message.
   Stream<T> _stream1() {
     initializeDartAPI();
@@ -912,6 +918,99 @@ class Query<T> {
   //   }
   // }
 
+  Future<Stream<T>> _streamIsolate() async {
+    final port = ReceivePort();
+    final isolateInit = StreamIsolateInit(port.sendPort, _ptr.address);
+    await Isolate.spawn(_queryAndVisit, isolateInit);
+
+    // The first message from the spawned isolate is a SendPort. This port is
+    // used to communicate with the spawned isolate.
+    SendPort? sendPort;
+
+    // Handle consumers closing the stream (potentially before all results
+    // have been streamed).
+    var closed = false;
+    final close = () {
+      if (closed) return;
+      closed = true;
+      // Send signal to isolate it should exit.
+      sendPort?.send(null);
+      port.close();
+      reachabilityFence(this);
+    };
+
+    try {
+      final controller = StreamController<T>(onCancel: close);
+      port.listen((dynamic message) {
+        // The first message from the spawned isolate is a SendPort. This port
+        // is used to communicate with the spawned isolate.
+        if (message is SendPort) {
+          sendPort = message;
+        }
+        // Further messages are ObxObjectMessage for data, String for errors
+        // and null when there is no more data.
+        else if (message is ObxObjectMessage) {
+          try {
+            controller.add(_entity.objectFromFB(
+                _store,
+                InternalStoreAccess.reader(_store).access(
+                    Pointer.fromAddress(message.dataPtrAddress),
+                    message.size)));
+            return;
+          } catch (e) {
+            controller.addError(e);
+          }
+        } else if (message is String) {
+          controller.addError(
+              ObjectBoxException('Query stream native exception: $message'));
+        } else if (message != null) {
+          controller.addError(ObjectBoxException(
+              'Query stream received an invalid message type '
+              '(${message.runtimeType}): $message'));
+        }
+        controller.close(); // done
+        close();
+      });
+      return controller.stream;
+    } catch (e) {
+      close();
+      rethrow;
+    }
+  }
+
+  Future<void> _queryAndVisit(StreamIsolateInit isolateInit) {
+    var sendPort = isolateInit.sendPort;
+
+    // FIXME How to listen to exit command while sending?
+    // Send a SendPort to the main isolate so that it can send to this isolate.
+    final commandPort = ReceivePort();
+    sendPort.send(commandPort.sendPort);
+
+    // FIXME Obtain query pointer; probably should build query completely inside
+    //  the isolate. E.g. create QueryBuilder for async. Though the isolate
+    //  would have to exist before it is actually known what type of query is run.
+    final queryPtr =
+        Pointer<OBX_query>.fromAddress(isolateInit.queryPtrAddress);
+
+    final visitor = dataVisitor((Pointer<Uint8> data, int size) {
+      // FIXME Return false here to stop visitor on exit command.
+      sendPort.send(ObxObjectMessage(data.address, size));
+      return true;
+    });
+    try {
+      checkObx(C.query_visit(queryPtr, visitor, nullptr));
+    } on Exception catch (e) {
+      // FIXME Catch ObjectBoxException and ObjectBoxNativeError specifically?
+      //   Or would it be fine to throw in here?
+      sendPort.send(e.toString());
+    }
+
+    // Signal to the main isolate there are no more results.
+    sendPort.send(null);
+
+    Isolate.exit();
+  }
+
   /// For internal testing purposes.
   String describe() {
     final result = dartStringFromC(C.query_describe(_ptr));
@@ -943,4 +1042,20 @@ class Query<T> {
     }
     return result;
   }
+}
+
+/// Message passed to entry point function of isolate.
+class StreamIsolateInit {
+  SendPort sendPort;
+  int queryPtrAddress;
+
+  StreamIsolateInit(this.sendPort, this.queryPtrAddress);
+}
+
+/// Message sent to main isolate containing info about one object.
+class ObxObjectMessage {
+  int dataPtrAddress;
+  int size;
+
+  ObxObjectMessage(this.dataPtrAddress, this.size);
 }
