@@ -1,11 +1,14 @@
 library query;
 
+import 'dart:developer' as developer;
 import 'dart:async';
 import 'dart:collection';
 import 'dart:ffi';
+import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 
+import 'package:async/async.dart';
 import 'package:ffi/ffi.dart';
 
 import '../../common.dart';
@@ -931,6 +934,7 @@ class Query<T> {
     // have been streamed).
     var closed = false;
     final close = () {
+      print('closing stream');
       if (closed) return;
       closed = true;
       // Send signal to isolate it should exit.
@@ -951,6 +955,7 @@ class Query<T> {
         // Further messages are ObxObjectMessage for data, String for errors
         // and null when there is no more data.
         else if (message is ObxObjectMessage) {
+          print('received object');
           try {
             controller.add(_entity.objectFromFB(
                 _store,
@@ -969,6 +974,8 @@ class Query<T> {
               'Query stream received an invalid message type '
               '(${message.runtimeType}): $message'));
         }
+        // Note: null message sent if all results received,
+        // also close to send exit command to spawned isolate.
         controller.close(); // done
         close();
       });
@@ -980,23 +987,39 @@ class Query<T> {
   }
 
   // Isolate entry point must be top-level or static.
-  static void _queryAndVisit(StreamIsolateInit isolateInit) {
+  static Future<void> _queryAndVisit(StreamIsolateInit isolateInit) async {
+    print('Spawning isolate.');
     var sendPort = isolateInit.sendPort;
 
-    // FIXME How to listen to exit command while sending?
+    // FIXME How to listen to exit command while in visitor loop?
+    //  Need to somehow pause visitor loop and process stream messages.
     // Send a SendPort to the main isolate so that it can send to this isolate.
     final commandPort = ReceivePort();
     sendPort.send(commandPort.sendPort);
 
-    // FIXME Obtain query pointer; probably should build query completely inside
-    //  the isolate. E.g. create QueryBuilder for async. Though the isolate
-    //  would have to exist before it is actually known what type of query is run.
+    var shouldExit = Completer<void>();
+    commandPort.listen((dynamic message) {
+      if (message == null) {
+        print('received exit command');
+        shouldExit.complete();
+      }
+    });
+
+    // FIXME Query might have already been closed and the pointer is invalid.
     final queryPtr =
         Pointer<OBX_query>.fromAddress(isolateInit.queryPtrAddress);
 
     final visitor = dataVisitor((Pointer<Uint8> data, int size) {
       // FIXME Return false here to stop visitor on exit command.
+      // FIXME Doesn't work as isolate runs on a single thread only
+      //  (same with variable instead of Completer).
+      if (shouldExit.isCompleted) {
+        print('stopping visitor');
+        return false;
+      }
+      print('sending object');
       sendPort.send(ObxObjectMessage(data.address, size));
+      sleep(const Duration(milliseconds: 10));
       return true;
     });
     try {
@@ -1005,13 +1028,15 @@ class Query<T> {
       // FIXME Catch ObjectBoxException and ObjectBoxNativeError specifically?
       //   Or would it be fine to throw in here?
       sendPort.send(e.toString());
+      return;
     }
 
-    // FIXME Pointers may already be invalid here, but main isolate might
-    //   not have received or deserialized final object.
     // Signal to the main isolate there are no more results.
     sendPort.send(null);
+    // Wait for main isolate to confirm close.
+    await shouldExit.future;
 
+    print('Spawned isolate finished.');
     // Only available on Dart 2.15+
     // Isolate.exit();
   }

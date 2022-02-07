@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:collection/collection.dart';
 import 'package:test/test.dart';
 
@@ -680,27 +682,33 @@ void main() {
     final foundIds = query.findIds();
     final stream =
         useIsolateStream ? await query.streamIsolate() : query.stream();
-    final streamed = await stream.toList();
-    expect(streamed.length, countMatching);
-    final streamedIds = streamed.map((e) => e.id).toList(growable: false);
+    // Just get the first and immediately cancel.
+    var testEntity = await stream.first;
+    // wait for isolate to finish
+    sleep(const Duration(seconds: 10));
 
-    // this is much much slower: expect(streamedIds, sameAsList(foundIds));
-    expect(const ListEquality<int>().equals(streamedIds, foundIds), isTrue);
 
-    // Test subscription cancellation doesn't leave non-freed resources.
-    final streamListenedItems = <TestEntity>{};
-
-    final start = DateTime.now();
-    final subStream =
-        useIsolateStream ? await query.streamIsolate() : query.stream();
-    final subscription = subStream.listen(streamListenedItems.add);
-    for (int i = 0; i < 10 && streamListenedItems.isEmpty; i++) {
-      await Future<void>.delayed(Duration(milliseconds: i));
-    }
-    print('Received ${streamListenedItems.length} items in '
-        '${DateTime.now().difference(start).inMilliseconds} milliseconds');
-    await subscription.cancel();
-    expect(streamListenedItems.length, isNonZero);
+    // final streamed = await stream.toList();
+    // expect(streamed.length, countMatching);
+    // final streamedIds = streamed.map((e) => e.id).toList(growable: false);
+    //
+    // // this is much much slower: expect(streamedIds, sameAsList(foundIds));
+    // expect(const ListEquality<int>().equals(streamedIds, foundIds), isTrue);
+    //
+    // // Test subscription cancellation doesn't leave non-freed resources.
+    // final streamListenedItems = <TestEntity>{};
+    //
+    // final start = DateTime.now();
+    // final subStream =
+    //     useIsolateStream ? await query.streamIsolate() : query.stream();
+    // final subscription = subStream.listen(streamListenedItems.add);
+    // for (int i = 0; i < 10 && streamListenedItems.isEmpty; i++) {
+    //   await Future<void>.delayed(Duration(milliseconds: i));
+    // }
+    // print('Received ${streamListenedItems.length} items in '
+    //     '${DateTime.now().difference(start).inMilliseconds} milliseconds');
+    // await subscription.cancel();
+    // expect(streamListenedItems.length, isNonZero);
 
     query.close();
   };
