@@ -934,7 +934,6 @@ class Query<T> {
     // have been streamed).
     var closed = false;
     final close = () {
-      print('closing stream');
       if (closed) return;
       closed = true;
       // Send signal to isolate it should exit.
@@ -955,7 +954,6 @@ class Query<T> {
         // Further messages are ObxObjectMessage for data, String for errors
         // and null when there is no more data.
         else if (message is ObxObjectMessage) {
-          print('received object');
           try {
             controller.add(_entity.objectFromFB(
                 _store,
@@ -988,7 +986,6 @@ class Query<T> {
 
   // Isolate entry point must be top-level or static.
   static Future<void> _queryAndVisit(StreamIsolateInit isolateInit) async {
-    print('Spawning isolate.');
     var sendPort = isolateInit.sendPort;
 
     // FIXME How to listen to exit command while in visitor loop?
@@ -997,29 +994,13 @@ class Query<T> {
     final commandPort = ReceivePort();
     sendPort.send(commandPort.sendPort);
 
-    var shouldExit = Completer<void>();
-    commandPort.listen((dynamic message) {
-      if (message == null) {
-        print('received exit command');
-        shouldExit.complete();
-      }
-    });
-
     // FIXME Query might have already been closed and the pointer is invalid.
     final queryPtr =
         Pointer<OBX_query>.fromAddress(isolateInit.queryPtrAddress);
 
     final visitor = dataVisitor((Pointer<Uint8> data, int size) {
       // FIXME Return false here to stop visitor on exit command.
-      // FIXME Doesn't work as isolate runs on a single thread only
-      //  (same with variable instead of Completer).
-      if (shouldExit.isCompleted) {
-        print('stopping visitor');
-        return false;
-      }
-      print('sending object');
       sendPort.send(ObxObjectMessage(data.address, size));
-      sleep(const Duration(milliseconds: 10));
       return true;
     });
     try {
@@ -1031,12 +1012,14 @@ class Query<T> {
       return;
     }
 
+    // TODO Wrap in transaction with visitor to ensure object data pointers are
+    //  valid until main isolate has deserialized everything.
+    // FIXME Creating a transaction requires Store, but then can't re-use query pointer!
     // Signal to the main isolate there are no more results.
     sendPort.send(null);
     // Wait for main isolate to confirm close.
-    await shouldExit.future;
+    await commandPort.first;
 
-    print('Spawned isolate finished.');
     // Only available on Dart 2.15+
     // Isolate.exit();
   }
