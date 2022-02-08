@@ -1,15 +1,13 @@
 library query;
 
-import 'dart:developer' as developer;
 import 'dart:async';
 import 'dart:collection';
 import 'dart:ffi';
-import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 
-import 'package:async/async.dart';
 import 'package:ffi/ffi.dart';
+import 'package:meta/meta.dart';
 
 import '../../common.dart';
 import '../../modelinfo/entity_definition.dart';
@@ -21,9 +19,7 @@ import '../bindings/data_visitor.dart';
 import '../bindings/helpers.dart';
 
 part 'builder.dart';
-
 part 'params.dart';
-
 part 'property.dart';
 
 // ignore_for_file: public_member_api_docs
@@ -923,7 +919,7 @@ class Query<T> {
 
   Future<Stream<T>> _streamIsolate() async {
     final port = ReceivePort();
-    final isolateInit = StreamIsolateInit(port.sendPort, _ptr.address);
+    final isolateInit = _StreamIsolateInit(port.sendPort, _ptr.address);
     await Isolate.spawn(_queryAndVisit, isolateInit);
 
     SendPort? sendPort;
@@ -954,7 +950,7 @@ class Query<T> {
         // - ObxObjectMessage for data,
         // - String for errors and
         // - null when there is no more data.
-        else if (message is ObxObjectMessage) {
+        else if (message is _ObxObjectMessage) {
           try {
             streamController.add(_entity.objectFromFB(
                 _store,
@@ -985,7 +981,7 @@ class Query<T> {
   }
 
   // Isolate entry point must be top-level or static.
-  static Future<void> _queryAndVisit(StreamIsolateInit isolateInit) async {
+  static Future<void> _queryAndVisit(_StreamIsolateInit isolateInit) async {
     var sendPort = isolateInit.sendPort;
 
     // FIXME How to listen to exit command while in visitor loop?
@@ -1005,7 +1001,7 @@ class Query<T> {
 
     final visitor = dataVisitor((Pointer<Uint8> data, int size) {
       // FIXME Return false here to stop visitor on exit command.
-      sendPort.send(ObxObjectMessage(data.address, size));
+      sendPort.send(_ObxObjectMessage(data.address, size));
       return true;
     });
     try {
@@ -1060,17 +1056,19 @@ class Query<T> {
 }
 
 /// Message passed to entry point function of isolate.
-class StreamIsolateInit {
-  SendPort sendPort;
-  int queryPtrAddress;
+@immutable
+class _StreamIsolateInit {
+  final SendPort sendPort;
+  final int queryPtrAddress;
 
-  StreamIsolateInit(this.sendPort, this.queryPtrAddress);
+  const _StreamIsolateInit(this.sendPort, this.queryPtrAddress);
 }
 
 /// Message sent to main isolate containing info about one object.
-class ObxObjectMessage {
-  int dataPtrAddress;
-  int size;
+@immutable
+class _ObxObjectMessage {
+  final int dataPtrAddress;
+  final int size;
 
-  ObxObjectMessage(this.dataPtrAddress, this.size);
+  const _ObxObjectMessage(this.dataPtrAddress, this.size);
 }
