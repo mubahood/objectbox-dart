@@ -926,24 +926,23 @@ class Query<T> {
     final isolateInit = StreamIsolateInit(port.sendPort, _ptr.address);
     await Isolate.spawn(_queryAndVisit, isolateInit);
 
-    // The first message from the spawned isolate is a SendPort. This port is
-    // used to communicate with the spawned isolate.
     SendPort? sendPort;
 
-    // Handle consumers closing the stream (potentially before all results
-    // have been streamed).
-    var closed = false;
-    final close = () {
-      if (closed) return;
-      closed = true;
+    // Callback to exit the isolate once consumers or this close the stream
+    // (potentially before all results have been streamed).
+    var isolateExitSent = false;
+    final signalIsolateExit = () {
+      if (isolateExitSent) return;
+      isolateExitSent = true;
       // Send signal to isolate it should exit.
       sendPort?.send(null);
       port.close();
+      // Query has finalizer attached, prevent GC until here.
       reachabilityFence(this);
     };
 
     try {
-      final controller = StreamController<T>(onCancel: close);
+      final streamController = StreamController<T>(onCancel: signalIsolateExit);
       port.listen((dynamic message) {
         // The first message from the spawned isolate is a SendPort. This port
         // is used to communicate with the spawned isolate.
@@ -951,35 +950,36 @@ class Query<T> {
           sendPort = message;
           return; // wait for next message.
         }
-        // Further messages are ObxObjectMessage for data, String for errors
-        // and null when there is no more data.
+        // Further messages are
+        // - ObxObjectMessage for data,
+        // - String for errors and
+        // - null when there is no more data.
         else if (message is ObxObjectMessage) {
           try {
-            controller.add(_entity.objectFromFB(
+            streamController.add(_entity.objectFromFB(
                 _store,
                 InternalStoreAccess.reader(_store).access(
                     Pointer.fromAddress(message.dataPtrAddress),
                     message.size)));
             return; // wait for next message.
           } catch (e) {
-            controller.addError(e);
+            streamController.addError(e);
           }
         } else if (message is String) {
-          controller.addError(
+          streamController.addError(
               ObjectBoxException('Query stream native exception: $message'));
         } else if (message != null) {
-          controller.addError(ObjectBoxException(
+          streamController.addError(ObjectBoxException(
               'Query stream received an invalid message type '
               '(${message.runtimeType}): $message'));
         }
-        // Note: null message sent if all results received,
-        // also close to send exit command to spawned isolate.
-        controller.close(); // done
-        close();
+        // Close the stream.
+        streamController.close();
+        signalIsolateExit();
       });
-      return controller.stream;
+      return streamController.stream;
     } catch (e) {
-      close();
+      signalIsolateExit();
       rethrow;
     }
   }
@@ -990,6 +990,7 @@ class Query<T> {
 
     // FIXME How to listen to exit command while in visitor loop?
     //  Need to somehow pause visitor loop and process stream messages.
+
     // Send a SendPort to the main isolate so that it can send to this isolate.
     final commandPort = ReceivePort();
     sendPort.send(commandPort.sendPort);
@@ -997,6 +998,10 @@ class Query<T> {
     // FIXME Query might have already been closed and the pointer is invalid.
     final queryPtr =
         Pointer<OBX_query>.fromAddress(isolateInit.queryPtrAddress);
+
+    // TODO Wrap in transaction to ensure object data pointers are
+    //  valid until main isolate has deserialized everything/confirmed close.
+    // FIXME Creating a transaction requires Store, but then can't re-use query pointer!
 
     final visitor = dataVisitor((Pointer<Uint8> data, int size) {
       // FIXME Return false here to stop visitor on exit command.
@@ -1012,9 +1017,6 @@ class Query<T> {
       return;
     }
 
-    // TODO Wrap in transaction with visitor to ensure object data pointers are
-    //  valid until main isolate has deserialized everything.
-    // FIXME Creating a transaction requires Store, but then can't re-use query pointer!
     // Signal to the main isolate there are no more results.
     sendPort.send(null);
     // Wait for main isolate to confirm close.
